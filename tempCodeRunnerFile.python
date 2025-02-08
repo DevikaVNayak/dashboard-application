@@ -1,0 +1,147 @@
+import dash
+from dash import dcc, html, Input, Output, State, dash_table
+import dash_bootstrap_components as dbc
+import pandas as pd
+import plotly.express as px
+import io
+import base64
+from flask import Flask
+import uuid
+import os
+
+# Initialize the Dash app with Bootstrap for styling
+external_stylesheets = [dbc.themes.BOOTSTRAP]
+server = Flask(__name__)
+app = dash.Dash(__name__, external_stylesheets=external_stylesheets, server=server)
+app.title = "Performance Scorecard Tool"
+app.config.suppress_callback_exceptions = True
+
+# In-memory "database" to store user sessions (since we're not implementing full authentication)
+users = {}
+
+# Default weights for the scoring criteria
+DEFAULT_WEIGHTS = {'Productivity': 0.4, 'Quality': 0.35, 'Timeliness': 0.25}
+
+# Layout of the app
+app.layout = dbc.Container([
+    html.H1("Performance Scorecard Tool", style={'textAlign': 'center', 'marginTop': 20}),
+    dcc.Store(id='session-id'),  # Hidden div inside the app that stores the intermediate value
+    dcc.Store(id='stored-data', storage_type='session'),
+
+    # Upload component
+    dcc.Upload(
+        id='upload-data',
+        children=html.Div(['Drag and Drop or ', html.A('Select Files', href='#')]),
+        style={
+            'width': '100%', 'height': '60px', 'lineHeight': '60px',
+            'borderWidth': '1px', 'borderStyle': 'dashed', 'borderRadius': '5px',
+            'textAlign': 'center', 'margin': '10px'
+        },
+        multiple=False
+    ),
+    html.Div(id='file-uploaded'),
+    html.Div(id='weight-adjustment', style={'display': 'none'}),
+    html.Div(id='output-data-upload'),
+
+    # Export buttons
+    html.Div([
+        dbc.Button("Download CSV", id='btn-csv', color='primary', style={'marginRight': '10px'}),
+        dbc.Button("Download Excel", id='btn-excel', color='secondary', style={'marginRight': '10px'})
+    ], style={'textAlign': 'center', 'marginTop': 20}),
+
+    dcc.Download(id='download-dataframe-csv'),
+    dcc.Download(id='download-dataframe-excel'),
+], fluid=True)
+
+# Callback to generate a unique session ID for each user
+@app.callback(Output('session-id', 'data'), Input('upload-data', 'contents'))
+def generate_session_id(contents):
+    return str(uuid.uuid4())
+
+# Function to parse uploaded file content
+def parse_contents(contents, filename):
+    content_type, content_string = contents.split(',')
+    decoded = base64.b64decode(content_string)
+    try:
+        if 'csv' in filename.lower():
+            df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
+        elif 'xls' in filename.lower():
+            df = pd.read_excel(io.BytesIO(decoded))
+        else:
+            return html.Div(['Unsupported file format. Please upload a CSV or Excel file.']), None
+    except Exception as e:
+        return html.Div([f'There was an error processing this file: {e}']), None
+    return None, df
+
+# Callback to process the uploaded file and store data
+@app.callback(
+    [Output('file-uploaded', 'children'), Output('stored-data', 'data'), Output('weight-adjustment', 'style')],
+    [Input('upload-data', 'contents')],
+    [State('upload-data', 'filename'), State('session-id', 'data')]
+)
+def update_output(contents, filename, session_id):
+    if contents is not None:
+        error_message, df = parse_contents(contents, filename)
+        if error_message:
+            return error_message, dash.no_update, {'display': 'none'}
+
+        # Store the DataFrame in the users dict
+        users[session_id] = df.to_dict('records')
+
+        # Display weight adjustment sliders
+        weight_adjustment_layout = html.Div([
+            html.H4("Adjust Weights", style={'marginTop': 20}),
+            dbc.Row([
+                dbc.Col(dbc.InputGroup([
+                    dbc.InputGroupText("Productivity"),
+                    dbc.Input(id='weight-productivity', type='number', min=0, max=1, step=0.05,
+                              value=DEFAULT_WEIGHTS['Productivity'])
+                ])),
+                dbc.Col(dbc.InputGroup([
+                    dbc.InputGroupText("Quality"),
+                    dbc.Input(id='weight-quality', type='number', min=0, max=1, step=0.05,
+                              value=DEFAULT_WEIGHTS['Quality'])
+                ])),
+                dbc.Col(dbc.InputGroup([
+                    dbc.InputGroupText("Timeliness"),
+                    dbc.Input(id='weight-timeliness', type='number', min=0, max=1, step=0.05,
+                              value=DEFAULT_WEIGHTS['Timeliness'])
+                ])),
+            ]),
+            html.Br(),
+            dbc.Button("Recalculate Scores", id='recalculate-button', color='success'),
+            html.Hr(),
+        ])
+
+        return html.Div([
+            html.H5(f"Uploaded File: {filename}"),
+            html.Hr(),
+            html.Div(id='data-table'),
+        ]), df.to_dict('records'), {'display': 'block'}
+    else:
+        return '', dash.no_update, {'display': 'none'}
+
+# Callback for CSV download
+@app.callback(
+    Output('download-dataframe-csv', 'data'),
+    [Input('btn-csv', 'n_clicks')],
+    [State('stored-data', 'data')],
+    prevent_initial_call=True
+)
+def download_csv(n_clicks, data):
+    df = pd.DataFrame(data)
+    return dcc.send_data_frame(df.to_csv, "scorecard.csv")
+
+# Callback for Excel download
+@app.callback(
+    Output('download-dataframe-excel', 'data'),
+    [Input('btn-excel', 'n_clicks')],
+    [State('stored-data', 'data')],
+    prevent_initial_call=True
+)
+def download_excel(n_clicks, data):
+    df = pd.DataFrame(data)
+    return dcc.send_data_frame(df.to_excel, "scorecard.xlsx", sheet_name="Scores", index=False)
+
+if __name__ == '__main__':
+    app.run_server(debug=True)
